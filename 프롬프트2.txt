@@ -1,0 +1,215 @@
+/**
+ * 설문 문항 데이터를 현재 활성화된 Google Sheet에서 읽어와 Google Forms를 자동 생성하는 스크립트입니다.
+ * * * * * * [사전 준비 사항]
+ * 1. Google Sheet의 1행에 '질문유형', '질문내용', '선택지(쉼표로구분)', '필수여부', '설명' 순서로 헤더를 입력합니다.
+ * 2. 2행부터 설문 문항 데이터를 위 헤더에 맞춰 입력합니다.
+ * * * * * * [사용 방법]
+ * 1. 설문 문항 데이터가 있는 Google Sheet를 엽니다.
+ * 2. '확장 프로그램' > 'Apps Script'를 선택하여 스크립트 편집기를 엽니다.
+ * 3. 기존 코드를 모두 지우고 이 스크립트 코드를 붙여넣고 저장합니다.
+ * 4. 시트로 돌아가 새로고침하거나 시트를 다시 열면 상단에 **'폼 생성'** 메뉴가 나타납니다.
+ * 5. '폼 생성' > '설문지 만들기'를 클릭하면 **제목과 요약을 입력**할 수 있는 창이 뜬 후, 새로운 설문지가 생성됩니다.
+ * 6. 요청되는 Forms/Sheets 접근 권한을 승인합니다.
+ */
+
+// --- 설문지 기본 정보 설정 (폼 생성 시 제목과 설명은 실행 시 사용자로부터 입력 받습니다.) ---
+
+/**
+ * 스프레드시트가 열릴 때 '폼 생성' 사용자 메뉴를 만듭니다.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+      .createMenu('폼 생성') 
+      .addItem('설문지 만들기', 'createFormFromTable') // 이 메뉴를 선택하면 입력창이 뜬 후 폼 생성까지 완료
+      .addToUi();
+}
+
+
+/**
+ * Google Forms를 새로 생성하고 현재 활성화된 시트 데이터를 기반으로 문항을 생성합니다.
+ */
+function createFormFromTable() {
+  const ui = SpreadsheetApp.getUi();
+  
+  // 1. 설문 제목 입력 받기
+  let titleResponse = ui.prompt(
+      '설문 제목 입력',
+      '생성할 Google Form의 제목을 입력하세요.',
+      ui.ButtonSet.OK_CANCEL);
+      
+  if (titleResponse.getSelectedButton() !== ui.Button.OK) {
+    ui.alert('설문 제목 입력이 취소되어 폼 생성을 중단합니다.');
+    return;
+  }
+  const formTitle = titleResponse.getResponseText().trim();
+  if (!formTitle) {
+    ui.alert('설문 제목이 입력되지 않아 폼 생성을 중단합니다.');
+    return;
+  }
+
+  // 2. 설문 요약 (설명) 입력 받기
+  let descriptionResponse = ui.prompt(
+      '설문 요약/설명 입력',
+      'Google Form의 상단에 표시될 요약(설명)을 입력하세요.',
+      ui.ButtonSet.OK_CANCEL);
+      
+  if (descriptionResponse.getSelectedButton() !== ui.Button.OK) {
+    ui.alert('설문 요약 입력이 취소되어 폼 생성을 중단합니다.');
+    return;
+  }
+  const formDescription = descriptionResponse.getResponseText().trim();
+  // 요약은 필수가 아니므로 빈 값이라도 진행
+
+  try {
+    // === 핵심 수정: getActiveForm() 대신 FormApp.create()를 사용하여 새로운 Forms 생성 ===
+    // 이 방식은 Sheets에 바인딩된 스크립트에서 Forms를 생성할 때 가장 안정적입니다.
+    const form = FormApp.create(formTitle);
+    
+    // 설문지 제목 및 설명 설정 (입력 받은 값 사용)
+    // 제목은 이미 생성 시 설정되었으므로 설명만 설정
+    form.setDescription(formDescription);
+    
+    // 기존 문항은 새로 생성한 폼이므로 삭제할 필요가 없습니다. (기존 코드를 제거)
+    // 기존 문항 모두 삭제 로직 제거
+    
+    // Google Sheets에서 문항 데이터를 현재 활성화된 시트로부터 가져옵니다.
+    const dataRows = getSurveyDataFromSheet();
+    
+    if (dataRows.length === 0) {
+      // 사용자에게 시트 데이터 부족을 알림
+      ui.alert('Google Sheet에서 유효한 문항 데이터를 찾지 못했습니다. 2행부터 데이터가 있는지 확인하세요. 설문지 자체는 생성되었습니다.');
+      // 데이터가 없어도 생성된 Forms는 남겨둡니다.
+      return;
+    }
+    
+    // 파싱된 데이터를 기반으로 문항 생성
+    dataRows.forEach(row => {
+      // 행: [질문유형, 질문내용, 선택지(쉼표로구분), 필수여부, 설명]
+      const [type, title, choices, required, helpText] = row.map(s => String(s).trim() || '');
+      
+      if (!title) {
+        Logger.log('[경고] 문항 제목이 비어있어 해당 행은 건너뜁니다.');
+        return;
+      }
+      
+      let item = null;
+      let isRequired = required === '필수';
+      
+      switch (type) {
+        case '객관식(단일)':
+          item = form.addMultipleChoiceItem();
+          const singleChoices = choices.split(',').map(c => item.createChoice(c.trim()));
+          item.setChoices(singleChoices);
+          item.setRequired(isRequired);
+          if (helpText) item.setHelpText(helpText);
+          break;
+          
+        case '객관식(복수)':
+          item = form.addCheckboxItem();
+          const multiChoices = choices.split(',').map(c => item.createChoice(c.trim()));
+          item.setChoices(multiChoices);
+          item.setRequired(isRequired);
+          if (helpText) item.setHelpText(helpText);
+          break;
+          
+        case '척도(숫자)':
+          item = form.addScaleItem();
+          const parts = choices.split(',');
+          if (parts.length > 1) {
+            // "1-전혀 아니다" -> lowerBound=1, firstLabel="전혀 아니다"
+            const firstPart = parts[0].split('-');
+            const lastPart = parts[parts.length - 1].split('-');
+            
+            const lowerBound = parseInt(firstPart[0]?.trim() || '1', 10);
+            const upperBound = parseInt(lastPart[0]?.trim() || '5', 10);
+            
+            const firstLabel = firstPart.length > 1 ? firstPart.slice(1).join('-').trim() : '';
+            const lastLabel = lastPart.length > 1 ? lastPart.slice(1).join('-').trim() : '';
+
+            if (!isNaN(lowerBound) && !isNaN(upperBound) && upperBound > lowerBound) {
+              item.setBounds(lowerBound, upperBound);
+              item.setLabels(firstLabel, lastLabel);
+              item.setRequired(isRequired);
+            } else {
+              Logger.log(`[경고] 척도 문항(${title}) 범위 파싱 오류. 1-5로 기본 설정됩니다.`);
+              item.setBounds(1, 5);
+              item.setRequired(isRequired);
+            }
+          }
+          // 척도 문항은 설명(helpText)을 넣지 않는 규칙을 따릅니다.
+          break;
+
+        case '단답형':
+          item = form.addTextItem();
+          item.setRequired(isRequired);
+          if (helpText) item.setHelpText(helpText);
+          break;
+          
+        case '장문형':
+          item = form.addParagraphTextItem();
+          item.setRequired(isRequired);
+          if (helpText) item.setHelpText(helpText);
+          break;
+          
+        case '날짜':
+          item = form.addDateItem();
+          item.setRequired(isRequired);
+          if (helpText) item.setHelpText(helpText);
+          break;
+          
+        case '시간':
+          item = form.addTimeItem();
+          item.setRequired(isRequired);
+          if (helpText) item.setHelpText(helpText);
+          break;
+          
+        default:
+          Logger.log(`[경고] 알 수 없는 질문 유형: ${type}. 문항(${title})은 건너뜁니다.`);
+          return; // 다음 문항으로
+      }
+      
+      // 공통 설정: 제목
+      if (item) {
+        item.setTitle(title);
+      }
+    });
+
+    // 최종 완료 알림과 Forms URL 제공
+    const formUrl = form.getEditUrl();
+    ui.alert(`Google Forms 자동 생성이 완료되었습니다. \n\n새로운 설문지 링크: \n${formUrl}`);
+    Logger.log('Google Forms 자동 생성이 완료되었습니다: ' + formUrl);
+
+  } catch (e) {
+    ui.alert('스크립트 실행 중 오류가 발생했습니다: ' + e.toString() + '. 권한을 확인하거나, 시트 데이터 형식을 확인하세요.');
+    Logger.log('스크립트 실행 중 오류가 발생했습니다: ' + e.toString());
+  }
+}
+
+/**
+ * 현재 활성화된 Google Sheet에서 설문 문항 데이터를 읽어옵니다.
+ * 시트의 첫 번째 행은 헤더로 간주하고 두 번째 행부터 데이터를 읽습니다.
+ * @returns {Array<Array<string>>} - 문항 데이터 배열
+ */
+function getSurveyDataFromSheet() {
+  try {
+    // 현재 활성화된 스프레드시트와 시트 사용
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getActiveSheet();
+    
+    // 데이터 전체 범위 가져오기
+    const range = sheet.getDataRange();
+    const values = range.getValues();
+    
+    if (values.length < 2) {
+        return []; // 헤더(1행)를 제외한 데이터 없음
+    }
+    
+    // 첫 번째 행(헤더)을 제외하고 2행부터의 데이터를 가져와 5열까지만 사용합니다.
+    const data = values.slice(1);
+    
+    return data.map(row => row.slice(0, 5));
+    
+  } catch (e) {
+    throw new Error(`Google Sheets에서 데이터를 읽는 중 문제가 발생했습니다: ${e.message}`);
+  }
+}
